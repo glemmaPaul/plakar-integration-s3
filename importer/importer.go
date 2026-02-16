@@ -140,23 +140,23 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 	}
 
 	for _, object := range listresults.Contents {
-		objkey := *object.Key
+		objkey := aws.ToString(object.Key)
 		if strings.HasSuffix(objkey, "/") {
 			continue
 		}
 
 		fi := objects.FileInfo{
 			Lname:    path.Base("/" + objkey),
-			Lsize:    *object.Size,
+			Lsize:    aws.ToInt64(object.Size),
 			Lmode:    0700,
-			LmodTime: *object.LastModified,
+			LmodTime: aws.ToTime(object.LastModified),
 			Ldev:     1,
 		}
 
 		records <- connectors.NewRecord("/"+objkey, "", fi, nil, func() (io.ReadCloser, error) {
 			object, err := p.awsS3Client.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: &p.bucket,
-				Key:    &objkey,
+				Key:    aws.String(objkey),
 			})
 
 			if err != nil {

@@ -2,7 +2,9 @@ package common
 
 import (
 	"context"
+	"crypto/rand"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,6 +21,22 @@ type mockHTTPClient struct {
 
 func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	return m.DoFunc(req)
+}
+
+func generateRandomBody(t *testing.T, size int64) string {
+	randomBody := make([]byte, size)
+	// fill with random bytes
+	rand.Read(randomBody)
+	return string(randomBody)
+}
+
+func generateRandomSize(t *testing.T) int64 {
+	randSize, err := rand.Int(rand.Reader, big.NewInt(1000))
+	size := randSize.Int64()
+	if err != nil {
+		t.Fatalf("expected no error, but got: %v", err)
+	}
+	return size
 }
 
 func newTestS3Client(t *testing.T, responseFunc func(req *http.Request) (*http.Response, error)) *s3.Client {
@@ -73,7 +91,7 @@ func Test_BucketExists_Bucket_Not_Found(t *testing.T) {
 	}
 }
 
-func TestBucketExists_OtherError(t *testing.T) {
+func TestBucketExists_AccessDenied(t *testing.T) {
 	client := newTestS3Client(t, func(req *http.Request) (*http.Response, error) {
 		// Simulate a different error, like a 403 Forbidden.
 		return &http.Response{
@@ -125,5 +143,67 @@ func Test_ObjectExists_Object_Not_Found(t *testing.T) {
 	}
 	if exists {
 		t.Errorf("expected object not to exist, but it did")
+	}
+}
+
+func Test_NewS3SeekableFileReader_Success(t *testing.T) {
+	size := generateRandomSize(t)
+	body := generateRandomBody(t, size)
+	client := newTestS3Client(t, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})
+	seekableFileReader := NewS3SeekableFileReader(context.TODO(), client, "my-existing-bucket", "my-existing-object")
+
+	readData := make([]byte, size)
+	n, err := seekableFileReader.Read(readData)
+	if err != nil {
+		t.Fatalf("expected no error, but got: %v", err)
+	}
+	if int(n) != int(size) {
+		t.Errorf("expected to read %d bytes, but got: %d", size, n)
+	}
+}
+
+func Test_NewS3SeekableFileReader_Read_Error(t *testing.T) {
+	size := generateRandomSize(t)
+	client := newTestS3Client(t, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader("<Error><Code>InternalServerError</Code></Error>")), // Not official AWS error response format
+		}, nil
+	})
+	seekableFileReader := NewS3SeekableFileReader(context.TODO(), client, "my-existing-bucket", "my-existing-object")
+
+	readData := make([]byte, size)
+	n, err := seekableFileReader.Read(readData)
+	if err == nil {
+		t.Fatalf("expected an error, but got nil")
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes read on error, but got: %d", n)
+	}
+}
+
+func Test_NewS3SeekableFileReader_ReadAt_Success(t *testing.T) {
+	size := generateRandomSize(t)
+	body := generateRandomBody(t, size)
+	client := newTestS3Client(t, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})
+	seekableFileReader := NewS3SeekableFileReader(context.TODO(), client, "my-existing-bucket", "my-existing-object")
+
+	readData := make([]byte, size)
+	n, err := seekableFileReader.ReadAt(readData, 0)
+	if err != nil {
+		t.Fatalf("expected no error, but got: %v", err)
+	}
+	if int(n) != int(size) {
+		t.Errorf("expected to read %d bytes, but got: %d", size, n)
 	}
 }

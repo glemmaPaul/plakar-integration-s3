@@ -37,11 +37,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/minio/minio-go/v7"
 )
 
 type Store struct {
-	minioClient *minio.Client
 	awsS3Client *s3.Client
 	location    string
 	host        string
@@ -393,11 +391,7 @@ func (s *Store) Get(ctx context.Context, res storage.StorageResource, mac object
 	}
 
 	//object, err := s.minioClient.GetObject(ctx, s.bucket, path, minio.GetObjectOptions{})
-	seekableFileReader, err := plakarss3.NewS3SeekableFileReader(ctx, s.awsS3Client, s.bucket, path)
-	if err != nil {
-		return nil, fmt.Errorf("get %s object: %w", res, err)
-	}
-
+	seekableFileReader := plakarss3.NewS3SeekableFileReader(ctx, s.awsS3Client, s.bucket, path)
 	if rg != nil {
 		return reading.NewSectionReadCloser(seekableFileReader, int64(rg.Offset), int64(rg.Length)), nil
 	}

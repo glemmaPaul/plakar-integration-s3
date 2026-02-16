@@ -166,11 +166,11 @@ func (s *S3SeekableFileReader) Close() error {
 	return nil
 }
 
-func NewS3SeekableFileReader(ctx context.Context, client *s3.Client, bucket, key string) (*S3SeekableFileReader, error) {
+func NewS3SeekableFileReader(ctx context.Context, client *s3.Client, bucket, key string) *S3SeekableFileReader {
 	return &S3SeekableFileReader{
 		ctx:    ctx,
 		client: client,
 		bucket: bucket,
 		key:    key,
-	}, nil
+	}
 }

@@ -146,8 +146,9 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 			results <- record.Ok()
 			continue
 		}
-		// NOTE: Do we need to use MD5 PutObjectInput?
-		_, err := p.awsS3Client.PutObject(ctx, plakarss3.NewPutObjectInput(p.bucket, path.Join(p.restoreDir, record.Pathname), record.Reader, record.FileInfo.Lsize, s3types.StorageClassStandard))
+
+		// NOTE: Do we need md5 checksum?
+		_, err := plakarss3.PutObjectSigned(ctx, p.awsS3Client, p.bucket, path.Join(p.restoreDir, record.Pathname), record.Reader, s3types.StorageClassStandard)
 		results <- record.Error(err)
 	}
 

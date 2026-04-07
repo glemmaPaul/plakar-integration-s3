@@ -33,6 +33,8 @@ import (
 	"github.com/PlakarKorp/kloset/objects"
 	"github.com/PlakarKorp/kloset/reading"
 
+	"github.com/minio/minio-go/v7"
+
 	plakarss3 "github.com/PlakarKorp/integration-s3/common"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -40,6 +42,7 @@ import (
 )
 
 type Store struct {
+	minioClient *minio.Client
 	awsS3Client *s3.Client
 	location    string
 	host        string
@@ -199,13 +202,13 @@ func (s *Store) Create(ctx context.Context, config []byte) error {
 	}
 
 	if s.mode()&storage.ModeRead == 0 {
-		_, err = s.awsS3Client.PutObject(ctx, plakarss3.NewPutObjectInput(s.bucket, s.realpath("CONFIG.frozen"), bytes.NewReader(config), int64(len(config)), s.storageClass))
+		_, err = plakarss3.PutObjectSigned(ctx, s.awsS3Client, s.bucket, s.realpath("CONFIG.frozen"), bytes.NewReader(config), s.storageClass)
 		if err != nil {
 			return fmt.Errorf("put object CONFIG.frozen: %w", err)
 		}
 	}
 
-	_, err = s.awsS3Client.PutObject(ctx, plakarss3.NewPutObjectInput(s.bucket, s.realpath("CONFIG"), bytes.NewReader(config), int64(len(config)), s.storageClass))
+	_, err = plakarss3.PutObjectSigned(ctx, s.awsS3Client, s.bucket, s.realpath("CONFIG"), bytes.NewReader(config), s.storageClass)
 
 	if err != nil {
 		return fmt.Errorf("put object CONFIG: %w", err)
@@ -238,7 +241,6 @@ func (s *Store) Open(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("bucket does not exist")
 	}
 
-	//object, err := s.minioClient.GetObject(ctx, s.bucket, s.realpath("CONFIG"), minio.GetObjectOptions{})
 	object, err := s.awsS3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &s.bucket,
 		Key:    aws.String(s.realpath("CONFIG")),
@@ -315,8 +317,9 @@ func (s *Store) List(ctx context.Context, res storage.StorageResource) ([]object
 
 	ret := make([]objects.MAC, 0)
 	listresults, err := s.awsS3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: &s.bucket,
-		Prefix: aws.String(prefix),
+		Bucket:    &s.bucket,
+		Prefix:    aws.String(prefix),
+		Delimiter: aws.String(""), // We want to list all objects, not just the ones in the prefix
 	})
 	if err != nil {
 		return nil, fmt.Errorf("error listing objects: %w", err)
@@ -346,8 +349,7 @@ func (s *Store) Put(ctx context.Context, res storage.StorageResource, mac object
 			return 0, fmt.Errorf("read %s object: %w", res, ioErr)
 		}
 
-		putObjectInput := plakarss3.NewPutObjectInput(s.bucket, s.realpath(fmt.Sprintf("packfiles/%02x/%016x", mac[0], mac)), buf, copied, s.storageClass)
-		_, err := s.awsS3Client.PutObject(ctx, putObjectInput)
+		_, err := plakarss3.PutObjectSigned(ctx, s.awsS3Client, s.bucket, s.realpath(fmt.Sprintf("packfiles/%02x/%016x", mac[0], mac)), buf, s.storageClass)
 		if err != nil {
 			return 0, fmt.Errorf("put %s object: %w", res, err)
 		}
@@ -356,8 +358,7 @@ func (s *Store) Put(ctx context.Context, res storage.StorageResource, mac object
 		s.bufPool.Put(buf)
 		return copied, nil
 	case storage.StorageResourceState:
-		putObjectInput := plakarss3.NewPutObjectInput(s.bucket, s.realpath(fmt.Sprintf("states/%02x/%016x", mac[0], mac)), rd, -1, s.storageClass)
-		_, err := s.awsS3Client.PutObject(ctx, putObjectInput)
+		_, err := plakarss3.PutObjectSigned(ctx, s.awsS3Client, s.bucket, s.realpath(fmt.Sprintf("states/%02x/%016x", mac[0], mac)), rd, s.storageClass)
 		if err != nil {
 			return 0, fmt.Errorf("put %s object: %w", res, err)
 		}
@@ -365,8 +366,7 @@ func (s *Store) Put(ctx context.Context, res storage.StorageResource, mac object
 		//return info.Size, nil
 		return 0, nil
 	case storage.StorageResourceLock:
-		putObjectInput := plakarss3.NewPutObjectInput(s.bucket, s.realpath(fmt.Sprintf("locks/%016x", mac)), rd, -1, s.storageClass)
-		_, err := s.awsS3Client.PutObject(ctx, putObjectInput)
+		_, err := plakarss3.PutObjectSigned(ctx, s.awsS3Client, s.bucket, s.realpath(fmt.Sprintf("locks/%016x", mac)), rd, s.storageClass)
 		if err != nil {
 			return 0, fmt.Errorf("put %s object: %w", res, err)
 		}
@@ -390,8 +390,11 @@ func (s *Store) Get(ctx context.Context, res storage.StorageResource, mac object
 		return nil, errors.ErrUnsupported
 	}
 
-	//object, err := s.minioClient.GetObject(ctx, s.bucket, path, minio.GetObjectOptions{})
-	seekableFileReader := plakarss3.NewS3SeekableFileReader(ctx, s.awsS3Client, s.bucket, path)
+	//object, err := s.minioClient.ListObjects(ctx, s.bucket, path, minio.ListObjectsOptions{})
+	seekableFileReader, err := plakarss3.NewS3SeekableReader(ctx, s.awsS3Client, s.bucket, path)
+	if err != nil {
+		return nil, fmt.Errorf("error creating seekable file reader: %w", err)
+	}
 	if rg != nil {
 		return reading.NewSectionReadCloser(seekableFileReader, int64(rg.Offset), int64(rg.Length)), nil
 	}

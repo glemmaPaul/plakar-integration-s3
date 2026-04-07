@@ -132,8 +132,9 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 	}
 
 	listresults, err := p.awsS3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: &p.bucket,
-		Prefix: aws.String(strings.TrimPrefix(p.scanDir, "/")),
+		Bucket:    &p.bucket,
+		Prefix:    aws.String(strings.TrimPrefix(p.scanDir, "/")),
+		Delimiter: aws.String(""), // We want to list all objects, not just the ones in the prefix
 	})
 	if err != nil {
 		return fmt.Errorf("error during list objects: %w", err)

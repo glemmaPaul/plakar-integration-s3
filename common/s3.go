@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"crypto/tls"
@@ -14,36 +15,56 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
+	transfertypes "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
+type S3Client interface {
+	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
+	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+}
+
 func Connect(location *url.URL, useSsl, insecure bool, accessKeyID, secretAccessKey string) (*s3.Client, error) {
 	creds := credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, "")
 
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		// TODO: make configurable (And perhaps omittable)
-		config.WithRegion("us-east-1"),
+		config.WithRegion("eu-west-1"),
 		config.WithCredentialsProvider(creds),
 	)
 	if err != nil {
 		return nil, err
 	}
+	loggingEnabled := true
 
-	return s3.NewFromConfig(cfg, buildOptions(location, useSsl, insecure, "plakar/1.0")...), nil
+	return s3.NewFromConfig(cfg, buildOptions(location, useSsl, insecure, "plakar/1.0", loggingEnabled)...), nil
 }
 
-func buildOptions(location *url.URL, useSsl, insecure bool, userAgent string) []func(*s3.Options) {
+func buildOptions(location *url.URL, useSsl, insecure bool, userAgent string, loggingEnabled bool) []func(*s3.Options) {
 	return []func(*s3.Options){
 		withEndpoint(location, useSsl),
 		withHTTPClient(insecure),
 		withUserAgent(userAgent),
+		withLogging(loggingEnabled),
 		func(o *s3.Options) {
 			// Make sure to use path style for S3 compatibility
 			o.UsePathStyle = true
 		},
+	}
+}
+
+func withLogging(loggingEnabled bool) func(*s3.Options) {
+	return func(o *s3.Options) {
+		if loggingEnabled {
+			o.ClientLogMode = aws.LogRequestWithBody | aws.LogResponseWithBody
+		}
 	}
 }
 
@@ -85,10 +106,11 @@ func withUserAgent(ua string) func(*s3.Options) {
 	}
 }
 
-func BucketExists(ctx context.Context, client *s3.Client, bucket string) (bool, error) {
-	_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: &bucket,
+func BucketExists(ctx context.Context, client S3Client, bucket string) (bool, error) {
+	bucketResponse, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
 	})
+	fmt.Printf("HEAD BUCKET: Metadata=%+v Error=%v\n", bucketResponse, err)
 	if err != nil {
 		var notFoundErr *types.NotFound
 		if errors.As(err, &notFoundErr) {
@@ -100,7 +122,7 @@ func BucketExists(ctx context.Context, client *s3.Client, bucket string) (bool, 
 	return true, nil
 }
 
-func ObjectExists(ctx context.Context, client *s3.Client, bucket, key string) (bool, error) {
+func ObjectExists(ctx context.Context, client S3Client, bucket, key string) (bool, error) {
 	_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -117,60 +139,42 @@ func ObjectExists(ctx context.Context, client *s3.Client, bucket, key string) (b
 	return true, nil
 }
 
-func NewPutObjectInput(bucket, key string, body io.Reader, contentLength int64, storageClass types.StorageClass) *s3.PutObjectInput {
-	hash := md5.New()
-	_, err := io.Copy(hash, body)
+func NewPutObjectInput(bucket, key string, body io.Reader, storageClass types.StorageClass) (*s3.PutObjectInput, error) {
+	content, err := io.ReadAll(body)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read body: %w", err)
 	}
-	md5string := base64.StdEncoding.EncodeToString(hash.Sum(nil))
+
+	hash := md5.Sum(content)
+	md5string := base64.StdEncoding.EncodeToString(hash[:])
+
 	return &s3.PutObjectInput{
-		Bucket:        &bucket,
-		Key:           &key,
-		Body:          body,
-		ContentLength: &contentLength,
-		StorageClass:  storageClass,
-		ContentMD5:    &md5string,
-	}
+		Bucket:       aws.String(bucket),
+		Key:          aws.String(key),
+		Body:         bytes.NewReader(content),
+		StorageClass: storageClass,
+		ContentMD5:   aws.String(md5string),
+	}, nil
 }
 
-type S3SeekableFileReader struct {
-	ctx    context.Context
-	client *s3.Client
-	bucket string
-	key    string
-}
-
-func (s *S3SeekableFileReader) ReadAt(p []byte, off int64) (n int, err error) {
-	limit := off + int64(len(p)) - 1
-	rangeHeader := fmt.Sprintf("bytes=%d-%d", off, limit)
-
-	out, err := s.client.GetObject(s.ctx, &s3.GetObjectInput{
-		Bucket: &s.bucket,
-		Key:    &s.key,
-		Range:  aws.String(rangeHeader),
-	})
+func PutObjectSigned(ctx context.Context, client S3Client, bucket, key string, body io.Reader, storageClass types.StorageClass) (*s3.PutObjectOutput, error) {
+	/*
+		Put object signed with md5 checksum.
+	*/
+	putObjectInput, err := NewPutObjectInput(bucket, key, body, storageClass)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("create put object input: %w", err)
 	}
-	defer out.Body.Close()
-
-	return io.ReadFull(out.Body, p)
+	return client.PutObject(ctx, putObjectInput)
 }
 
-func (s *S3SeekableFileReader) Read(p []byte) (n int, err error) {
-	return s.ReadAt(p, 0)
-}
-
-func (s *S3SeekableFileReader) Close() error {
-	return nil
-}
-
-func NewS3SeekableFileReader(ctx context.Context, client *s3.Client, bucket, key string) *S3SeekableFileReader {
-	return &S3SeekableFileReader{
-		ctx:    ctx,
-		client: client,
-		bucket: bucket,
-		key:    key,
+func UploadObject(ctx context.Context, client transfermanager.Client, bucket, key string, body io.Reader, storageClass types.StorageClass) (*transfermanager.UploadObjectOutput, error) {
+	putObjectInput := &transfermanager.UploadObjectInput{
+		Bucket:            aws.String(bucket),
+		Key:               aws.String(key),
+		Body:              body,
+		StorageClass:      transfertypes.StorageClass(storageClass),
+		ChecksumAlgorithm: transfertypes.ChecksumAlgorithmSha256,
 	}
+	return client.UploadObject(ctx, putObjectInput)
 }

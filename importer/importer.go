@@ -89,7 +89,14 @@ func NewS3Importer(ctx context.Context, opts *connectors.Options, name string, c
 		return nil, err
 	}
 
-	conn, err := plakarss3.Connect(parsed, useSsl, insecure, accessKey, secretAccessKey)
+	var region string
+	if value, ok := config["region"]; !ok {
+		return nil, fmt.Errorf("missing region")
+	} else {
+		region = value
+	}
+
+	conn, err := plakarss3.Connect(parsed, useSsl, insecure, region, accessKey, secretAccessKey)
 	if err != nil {
 		return nil, err
 	}

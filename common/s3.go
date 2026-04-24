@@ -32,18 +32,18 @@ type S3Client interface {
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 }
 
-func Connect(location *url.URL, useSsl, insecure bool, accessKeyID, secretAccessKey string) (*s3.Client, error) {
+func Connect(location *url.URL, useSsl, insecure bool, region string, accessKeyID, secretAccessKey string) (*s3.Client, error) {
 	creds := credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, "")
 
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		// TODO: make configurable (And perhaps omittable)
-		config.WithRegion("eu-west-1"),
+		config.WithRegion(region),
 		config.WithCredentialsProvider(creds),
 	)
 	if err != nil {
 		return nil, err
 	}
-	loggingEnabled := true
+	loggingEnabled := false
 
 	return s3.NewFromConfig(cfg, buildOptions(location, useSsl, insecure, "plakar/1.0", loggingEnabled)...), nil
 }

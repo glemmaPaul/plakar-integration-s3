@@ -45,8 +45,8 @@ func init() {
 	exporter.Register("s3", 0, NewS3Exporter)
 }
 
-func connect(location *url.URL, useSsl, insecure bool, accessKeyID, secretAccessKey string) (*s3.Client, error) {
-	conn, err := plakarss3.Connect(location, useSsl, insecure, accessKeyID, secretAccessKey)
+func connect(location *url.URL, useSsl, insecure bool, region string, accessKeyID, secretAccessKey string) (*s3.Client, error) {
+	conn, err := plakarss3.Connect(location, useSsl, insecure, region, accessKeyID, secretAccessKey)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +87,13 @@ func NewS3Exporter(ctx context.Context, opts *connectors.Options, name string, c
 		insecure = tmp
 	}
 
+	var region string
+	if value, ok := config["region"]; !ok {
+		return nil, fmt.Errorf("missing region")
+	} else {
+		region = value
+	}
+
 	parsed, err := url.Parse(target)
 	if err != nil {
 		return nil, err
@@ -98,7 +105,7 @@ func NewS3Exporter(ctx context.Context, opts *connectors.Options, name string, c
 		restoreDir = path.Clean("/" + strings.Join(atoms[1:], "/"))
 	)
 
-	conn, err := connect(parsed, useSsl, insecure, accessKey, secretAccessKey)
+	conn, err := connect(parsed, useSsl, insecure, region, accessKey, secretAccessKey)
 	if err != nil {
 		return nil, err
 	}

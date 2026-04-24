@@ -25,8 +25,10 @@ import (
 	"strconv"
 	"strings"
 
+	plakarss3 "github.com/PlakarKorp/integration-s3/common"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/importer"
@@ -36,6 +38,7 @@ import (
 
 type S3Importer struct {
 	minioClient *minio.Client
+	awsS3Client *s3.Client
 
 	bucket  string
 	host    string
@@ -44,32 +47,6 @@ type S3Importer struct {
 
 func init() {
 	importer.Register("s3", 0, NewS3Importer)
-}
-
-func connect(location *url.URL, useSsl, insecure bool, accessKeyID, secretAccessKey string) (*minio.Client, error) {
-	endpoint := location.Host
-
-	transport, err := minio.DefaultTransport(useSsl)
-	if err != nil {
-		return nil, err
-	}
-
-	if insecure {
-		transport.TLSClientConfig.InsecureSkipVerify = true
-	}
-
-	client, err := minio.New(endpoint, &minio.Options{
-		Creds:     credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
-		Secure:    useSsl,
-		Transport: transport,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	client.SetAppInfo("plakar", "v1.1.0")
-
-	return client, nil
 }
 
 func NewS3Importer(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (importer.Importer, error) {
@@ -112,7 +89,14 @@ func NewS3Importer(ctx context.Context, opts *connectors.Options, name string, c
 		return nil, err
 	}
 
-	conn, err := connect(parsed, useSsl, insecure, accessKey, secretAccessKey)
+	var region string
+	if value, ok := config["region"]; !ok {
+		return nil, fmt.Errorf("missing region")
+	} else {
+		region = value
+	}
+
+	conn, err := plakarss3.Connect(parsed, useSsl, insecure, region, accessKey, secretAccessKey)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +108,7 @@ func NewS3Importer(ctx context.Context, opts *connectors.Options, name string, c
 	return &S3Importer{
 		bucket:      bucket,
 		scanDir:     scanDir,
-		minioClient: conn,
+		awsS3Client: conn,
 		host:        parsed.Host,
 	}, nil
 }
@@ -135,11 +119,11 @@ func (p *S3Importer) Type() string          { return "s3" }
 func (p *S3Importer) Flags() location.Flags { return 0 }
 
 func (p *S3Importer) Ping(ctx context.Context) error {
-	ok, err := p.minioClient.BucketExists(ctx, p.bucket)
+	exists, err := plakarss3.BucketExists(ctx, p.awsS3Client, p.bucket)
 	if err != nil {
-		return err
+		return fmt.Errorf("check if bucket exists: %w", err)
 	}
-	if !ok {
+	if !exists {
 		return fmt.Errorf("bucket does not exist")
 	}
 	return nil
@@ -154,27 +138,40 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 		return err
 	}
 
-	listopts := minio.ListObjectsOptions{
-		Prefix:    strings.TrimPrefix(p.scanDir, "/"),
-		Recursive: true,
+	listresults, err := p.awsS3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:    &p.bucket,
+		Prefix:    aws.String(strings.TrimPrefix(p.scanDir, "/")),
+		Delimiter: aws.String(""), // We want to list all objects, not just the ones in the prefix
+	})
+	if err != nil {
+		return fmt.Errorf("error during list objects: %w", err)
 	}
-	for object := range p.minioClient.ListObjects(ctx, p.bucket, listopts) {
-		// Some backend actually return _folders_, which they
-		// shouldn't so just skip over those.
-		if strings.HasSuffix(object.Key, "/") {
+
+	for _, object := range listresults.Contents {
+		objkey := aws.ToString(object.Key)
+		if strings.HasSuffix(objkey, "/") {
 			continue
 		}
 
 		fi := objects.FileInfo{
-			Lname:    path.Base("/" + object.Key),
-			Lsize:    object.Size,
+			Lname:    path.Base("/" + objkey),
+			Lsize:    aws.ToInt64(object.Size),
 			Lmode:    0700,
-			LmodTime: object.LastModified,
+			LmodTime: aws.ToTime(object.LastModified),
 			Ldev:     1,
 		}
 
-		records <- connectors.NewRecord("/"+object.Key, "", fi, nil, func() (io.ReadCloser, error) {
-			return p.minioClient.GetObject(ctx, p.bucket, object.Key, minio.GetObjectOptions{})
+		records <- connectors.NewRecord("/"+objkey, "", fi, nil, func() (io.ReadCloser, error) {
+			object, err := p.awsS3Client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: &p.bucket,
+				Key:    aws.String(objkey),
+			})
+
+			if err != nil {
+				return nil, fmt.Errorf("error during get object: %w", err)
+			}
+
+			return object.Body, nil
 		})
 	}
 
